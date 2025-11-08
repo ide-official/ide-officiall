@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+  <title>KillSwap Shooter</title>
+  <style>
+    html,body{height:100%;margin:0;background:#0b0b0b;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;display:flex;justify-content:center;align-items:flex-start;touch-action:none;}
+    #lobby,#gameWrap{display:flex;flex-direction:column;align-items:center;}
+    #game{background:#070707;box-shadow:0 8px 30px rgba(0,0,0,0.7);border:2px solid #222;display:none;touch-action:none;}
+    input,button{padding:6px 10px;margin:6px;border-radius:6px;border:1px solid #333;background:#161616;color:#ddd;cursor:pointer}
+    #hud{width:800px;margin:12px 0 0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;}
+    .panel{background:#101010;padding:10px;border-radius:8px;border:1px solid #222;min-width:140px;text-align:center;}
+    #leaderboard{margin-top:10px;min-width:200px;text-align:left;}
+    #mobileBuildBtn{position:fixed;bottom:20px;right:20px;width:60px;height:60px;border-radius:50%;background:#aaffaa;display:none;align-items:center;justify-content:center;color:#070707;font-size:24px;user-select:none;}
+  </style>
+</head>
+<body>
+  <div id="lobby">
+    <h2>KillSwap Shooter</h2>
+    <input type="text" id="playerName" placeholder="Enter your name" />
+    <div>
+      <button id="singleBtn">Singleplayer</button>
+      <button id="multiBtn">Local Multiplayer</button>
+    </div>
+  </div>
+  <div id="gameWrap">
+    <canvas id="game" width="800" height="600"></canvas>
+    <div id="hud">
+      <div class="panel">Player: <span id="playerLabel"></span></div>
+      <div class="panel">Weapon: <span id="weaponName">AR</span></div>
+      <div class="panel">HP: <span id="hp">100</span></div>
+      <div class="panel"><button id="grenadeBtn">Throw Grenade</button></div>
+      <div class="panel"><button id="restart">Restart</button></div>
+    </div>
+    <div id="leaderboard"></div>
+    <div id="mobileBuildBtn">B</div>
+  </div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const weaponNameEl = document.getElementById('weaponName');
+const hpEl = document.getElementById('hp');
+const playerLabelEl = document.getElementById('playerLabel');
+const lobbyEl = document.getElementById('lobby');
+const gameWrapEl = document.getElementById('gameWrap');
+const leaderboardEl = document.getElementById('leaderboard');
+const mobileBuildBtn = document.getElementById('mobileBuildBtn');
+
+let mouse = {x: W/2, y: H/2, down: false};
+let keys = {};
+let players = [];
+let bullets = [];
+let enemies = [];
+let grenades = [];
+let buildings = [];
+let buildingDots = [];
+let weapons = ['AR','SMG','Pump Shotgun','Sniper','AK','Revolver'];
+let lastShot = performance.now();
+let spawnInterval;
+let grenadeCooldown=false;
+
+let isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+if(isMobile){ mobileBuildBtn.style.display='flex'; }
+
+canvas.addEventListener('mousemove', e=>{ if(!isMobile){ const r=canvas.getBoundingClientRect(); mouse.x=e.clientX-r.left; mouse.y=e.clientY-r.top; } });
+canvas.addEventListener('mousedown', ()=>{ if(!isMobile) mouse.down=true; });
+canvas.addEventListener('mouseup', ()=>{ if(!isMobile) mouse.down=false; });
+canvas.addEventListener('touchstart', e=>{
+  e.preventDefault();
+  mouse.down=true;
+  mouse.x = e.touches[0].clientX - canvas.getBoundingClientRect().left;
+  mouse.y = e.touches[0].clientY - canvas.getBoundingClientRect().top;
+});
+canvas.addEventListener('touchmove', e=>{
+  e.preventDefault();
+  mouse.x = e.touches[0].clientX - canvas.getBoundingClientRect().left;
+  mouse.y = e.touches[0].clientY - canvas.getBoundingClientRect().top;
+});
+canvas.addEventListener('touchend', e=>{ mouse.down=false; });
+
+window.addEventListener('keydown',e=>{ keys[e.key.toLowerCase()]=true; if(e.key.toLowerCase()==='y' && !isMobile) addBuildDot(); });
+window.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+mobileBuildBtn.addEventListener('touchstart',addBuildDot);
+
+document.getElementById('singleBtn').addEventListener('click',()=>startGame('single'));
+document.getElementById('multiBtn').addEventListener('click',()=>startGame('multi'));
+document.getElementById('grenadeBtn').addEventListener('click',throwGrenade);
+
+class Player{
+  constructor(name,x,y,color){
+    this.name=name; this.x=x; this.y=y; this.r=14; this.hp=100; this.speed=200; this.color=color; this.weaponIndex=0; this.kills=0;
+  }
+  move(dt){
+    let mvx=0,mvy=0;
+    if(!isMobile){
+      if(this === players[0]){ if(keys['w']) mvy-=1; if(keys['s']) mvy+=1; if(keys['a']) mvx-=1; if(keys['d']) mvx+=1; }
+      else { if(keys['arrowup']) mvy-=1; if(keys['arrowdown']) mvy+=1; if(keys['arrowleft']) mvx-=1; if(keys['arrowright']) mvx+=1; }
+    }
+    const len=Math.hypot(mvx,mvy)||1;
+    this.x+=(mvx/len)*this.speed*dt;
+    this.y+=(mvy/len)*this.speed*dt;
+    this.x=Math.max(this.r,this.x); this.x=Math.min(W-this.r,this.x);
+    this.y=Math.max(this.r,this.y); this.y=Math.min(H-this.r,this.y);
+  }
+  shoot(targetX,targetY){
+    const now=performance.now();
+    if((now-lastShot)/1000<0.2) return;
+    lastShot=now;
+    const ang=Math.atan2(targetY-this.y,targetX-this.x);
+    bullets.push({x:this.x,y:this.y,vx:Math.cos(ang)*500,vy:Math.sin(ang)*500,dmg:25,owner:this});
+  }
+  cycleWeapon(){ this.weaponIndex=(this.weaponIndex+1)%weapons.length; }
+}
+
+function spawnEnemy(){ for(let i=0;i<6;i++){ const x=Math.random()*W, y=Math.random()*H; enemies.push({x,y,r:14,hp:50,maxHp:50,speed:50}); } }
+function throwGrenade(){ if(grenadeCooldown) return; grenades.push({x:players[0].x,y:players[0].y,r:0,exploded:false}); grenadeCooldown=true; setTimeout(()=>grenadeCooldown=false,5000); }
+function addBuildDot(){ buildingDots.push({x:players[0].x, y:players[0].y}); if(buildingDots.length===2){ buildings.push({x1:buildingDots[0].x,y1:buildingDots[0].y,x2:buildingDots[1].x,y2:buildingDots[1].y}); const minX=Math.min(buildingDots[0].x,buildingDots[1].x), maxX=Math.max(buildingDots[0].x,buildingDots[1].x), minY=Math.min(buildingDots[0].y,buildingDots[1].y), maxY=Math.max(buildingDots[0].y,buildingDots[1].y); for(let i=enemies.length-1;i>=0;i--){ const e=enemies[i]; if(e.x>=minX && e.x<=maxX && e.y>=minY && e.y<=maxY){ enemies.splice(i,1); } } buildingDots=[]; } }
+
+function startGame(mode){ const name=document.getElementById('playerName').value||'Player'; lobbyEl.style.display='none'; gameWrapEl.style.display='flex'; canvas.style.display='block'; if(mode==='single'){ players=[new Player(name,W/2,H/2,'#bfe3ff')]; } else { players=[new Player(name,W/3,H/2,'#bfe3ff'), new Player('P2',2*W/3,H/2,'#ffb366')]; } playerLabelEl.innerText = players.map(p=>p.name).join(', '); spawnEnemy(); spawnInterval = setInterval(spawnEnemy, 7000); requestAnimationFrame(loop); }
+
+function update(dt){
+  for(const p of players)p.move(dt);
+  if(mouse.down) players[0].shoot(mouse.x,mouse.y);
+  for(let i=bullets.length-1;i>=0;i--){ const b=bullets[i]; b.x+=b.vx*dt; b.y+=b.vy*dt; if(b.x<0||b.x>W||b.y<0||b.y>H) bullets.splice(i,1); for(let j=enemies.length-1;j>=0;j--){ const e=enemies[j]; const dx=b.x-e.x,dy=b.y-e.y; if(dx*dx+dy*dy<e.r*e.r){ e.hp-=b.dmg; bullets.splice(i,1); if(e.hp<=0){ enemies.splice(j,1); b.owner.kills++; b.owner.cycleWeapon(); } break; } } }
+  for(const e of enemies){ if(players.length===0) continue; let target=players[0]; for(const p of players){ const dist=Math.hypot(p.x-e.x,p.y-e.y); if(dist<Math.hypot(target.x-e.x,target.y-e.y)) target=p; } const ang=Math.atan2(target.y-e.y,target.x-e.x); e.x+=Math.cos(ang)*e.speed*dt; e.y+=Math.sin(ang)*e.speed*dt; e.x=Math.max(e.r, Math.min(W-e.r, e.x)); e.y=Math.max(e.r, Math.min(H-e.r, e.y)); }
+  for(const g of grenades){ if(!g.exploded){ g.r+=200*dt; if(g.r>=20){ g.exploded=true; for(const p of players){if(Math.hypot(p.x-g.x,p.y-g.y)<=20)p.hp-=75;} for(const e of enemies){if(Math.hypot(e.x-g.x,e.y-g.y)<=20)e.hp-=75;} } } }
+  updateLeaderboard();
+}
+
+function updateLeaderboard(){ const sorted=[...players].sort((a,b)=>b.kills-a.kills); leaderboardEl.innerHTML='<strong>Leaderboard:</strong><br>'+sorted.map((p,i)=>{ const crown=i===0?'👑 ':''; return `${crown}${p.name}: ${p.kills} kills`; }).join('<br>'); }
+
+function draw(){
+  ctx.fillStyle='#070707';ctx.fillRect(0,0,W,H);
+  for(const p of players){ctx.fillStyle=p.color; ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();}
+  ctx.fillStyle='#ffd'; for(const b of bullets){ctx.beginPath();ctx.arc(b.x,b.y,4,0,Math.PI*2);ctx.fill();}
+  for(const e of enemies){ctx.fillStyle='#ff6666'; ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill(); ctx.fillStyle='#0f0'; ctx.fillRect(e.x-10,e.y-20,20*(e.hp/e.maxHp),3);}
+  for(const g of grenades){if(!g.exploded){ctx.fillStyle='orange';ctx.beginPath();ctx.arc(g.x,g.y,g.r,0,Math.PI*2);ctx.fill();}}
+  ctx.strokeStyle='#aaffaa'; ctx.lineWidth=2; for(const b of buildings){ctx.beginPath();ctx.moveTo(b.x1,b.y1);ctx.lineTo(b.x2,b.y2);ctx.stroke();}
+  ctx.fillStyle='#ff5555'; for(const d of buildingDots){ctx.beginPath();ctx.arc(d.x,d.y,4,0,Math.PI*2);ctx.fill();}
+}
+
+let lastTime=performance.now();
+function loop(now){ const dt=(now-lastTime)/1000; lastTime=now; update(dt); draw(); requestAnimationFrame(loop); }
+
+document.getElementById('restart').addEventListener('click',()=>{
+  lobbyEl.style.display='flex'; gameWrapEl.style.display='none'; canvas.style.display='none';
+  enemies=[]; bullets=[]; players=[]; grenades=[]; buildings=[]; buildingDots=[];
+  leaderboardEl.innerHTML=''; clearInterval(spawnInterval);
+});
+</script>
+</body>
+</html>
